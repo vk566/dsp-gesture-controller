@@ -3,7 +3,7 @@
 #  Usage: irm https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/setup.ps1 | iex
 # ============================================================
 
-$REPO_RAW = "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main"
+$REPO_RAW = "https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main"
 $INSTALL_DIR = "$env:USERPROFILE\DSPGestureController"
 
 # ── Colours ─────────────────────────────────────────────────
