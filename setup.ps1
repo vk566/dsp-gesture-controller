@@ -3,11 +3,11 @@
 #  Usage: irm https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main/setup.ps1 | iex
 # ============================================================
 
-$REPO_RAW    = "https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main"
-$INSTALL_DIR = "$env:USERPROFILE\DSPGestureController"
-$LAUNCHER    = "$INSTALL_DIR\launcher.ps1"
-$PY312_PATH  = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-$PY312_URL   = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe"
+$REPO_RAW     = "https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main"
+$INSTALL_DIR  = "$env:USERPROFILE\DSPGestureController"
+$LAUNCHER     = "$INSTALL_DIR\launcher.ps1"
+$PY312_PATH   = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+$PY312_URL    = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe"
 $VERSION_FILE = "$INSTALL_DIR\version.txt"
 $VERSION_URL  = "$REPO_RAW/version.txt"
 
@@ -22,23 +22,17 @@ function Check-ForUpdates {
     try {
         $remoteVersion = (Invoke-WebRequest -Uri $VERSION_URL -UseBasicParsing -ErrorAction Stop).Content.Trim()
         $localVersion  = if (Test-Path $VERSION_FILE) { (Get-Content $VERSION_FILE).Trim() } else { "0.0" }
-
         if ($remoteVersion -ne $localVersion) {
             Write-Yellow "============================================"
-            Write-Yellow "  UPDATE AVAILABLE! ($localVersion → $remoteVersion)"
+            Write-Yellow "  UPDATE AVAILABLE! ($localVersion -> $remoteVersion)"
             Write-Yellow "  Downloading latest files..."
             Write-Yellow "============================================"
-
             foreach ($file in @("collect_gestures.py","dsp_hand_gesture_ppt.py")) {
                 try {
                     Invoke-WebRequest -Uri "$REPO_RAW/$file" -OutFile "$INSTALL_DIR\$file" -ErrorAction Stop
                     Write-Green "[+] Updated: $file"
-                } catch {
-                    Write-Red "[!] Failed to update: $file"
-                }
+                } catch { Write-Red "[!] Failed to update: $file" }
             }
-
-            # Save new version
             $remoteVersion | Out-File -FilePath $VERSION_FILE -Encoding UTF8 -Force
             Write-Green "[+] Updated to version $remoteVersion"
             Write-Host ""
@@ -53,7 +47,7 @@ function Check-ForUpdates {
     }
 }
 
-# ── Menu Function ────────────────────────────────────────────
+# ── Menu ─────────────────────────────────────────────────────
 function Show-Menu {
     Clear-Host
     Write-Cyan "============================================"
@@ -70,59 +64,90 @@ function Show-Menu {
 # ── View & Delete Gestures ───────────────────────────────────
 function Manage-Gestures {
     $pkl = "$INSTALL_DIR\clean_gestures.pkl"
-    if (-not (Test-Path $pkl)) {
-        Write-Yellow "No gestures file found!"
-        Start-Sleep -Seconds 1
-        return
-    }
 
     while ($true) {
-        $listScript = "import pickle`nf=open(r'$pkl','rb');g=pickle.load(f);f.close()`n" +
-                      'print(chr(10).join([f"{n}|{len(s)}" for n,s in g.items()])) if g else print("NO_GESTURES")'
-        $output = & $PY312_PATH -c $listScript 2>&1
-
         Clear-Host
         Write-Cyan "============================================"
         Write-Cyan "         TRAINED GESTURES"
         Write-Cyan "============================================"
 
-        if ($output -contains "NO_GESTURES" -or -not $output) {
-            Write-Yellow "  No gestures trained yet!"
-            Write-Cyan "============================================"
-            Write-Host "  [B]  Back to main menu"
+        if (-not (Test-Path $pkl)) {
+            Write-Yellow "  No gestures file found!"
+            Write-Yellow "  Please record gestures first (Option 1)"
             Write-Cyan "============================================"
             Write-Host ""
-            $choice = Read-Host "Enter your choice"
+            Read-Host "Press Enter to go back"
             return
         }
 
+        # Get gesture list from Python
+        $listScript = @"
+import pickle
+with open(r'$pkl', 'rb') as f:
+    g = pickle.load(f)
+if not g:
+    print('EMPTY')
+else:
+    for i,(name,samples) in enumerate(g.items(),1):
+        print(f'{i}|{name}|{len(samples)}')
+"@
+        $output = & $PY312_PATH -c $listScript 2>&1
+
+        if ($output -contains "EMPTY" -or -not $output) {
+            Write-Yellow "  No gestures trained yet!"
+            Write-Yellow "  Please record gestures first (Option 1)"
+            Write-Cyan "============================================"
+            Write-Host ""
+            Read-Host "Press Enter to go back"
+            return
+        }
+
+        # Show gesture list
         $gestures = @()
-        $i = 1
         foreach ($line in $output) {
-            if ($line -match "^(.+)\|(\d+)$") {
-                Write-Host "  [$i]  $($matches[1])   ($($matches[2]) samples)"
-                $gestures += $matches[1]
-                $i++
+            if ($line -match "^(\d+)\|(.+)\|(\d+)$") {
+                $num     = $matches[1]
+                $gName   = $matches[2]
+                $samples = $matches[3]
+                Write-Host "  [$num]  " -NoNewline
+                Write-Host "$gName" -ForegroundColor White -NoNewline
+                Write-Host "  →  " -NoNewline
+                Write-Host "$samples sample(s)" -ForegroundColor Yellow
+                $gestures += $gName
             }
         }
 
+        Write-Cyan "--------------------------------------------"
+        Write-Host "  Total gestures: " -NoNewline
+        Write-Host "$($gestures.Count)" -ForegroundColor Green
         Write-Cyan "--------------------------------------------"
         Write-Host "  [D]  Delete a gesture"
         Write-Host "  [B]  Back to main menu"
         Write-Cyan "============================================"
         Write-Host ""
+
         $choice = Read-Host "Enter your choice"
 
         if ($choice -eq "B" -or $choice -eq "b") { return }
 
         if ($choice -eq "D" -or $choice -eq "d") {
             Write-Host ""
+            Write-Yellow "Available gestures: $($gestures -join ', ')"
             $delName = (Read-Host "Enter gesture name to delete").Trim().ToLower()
+
             if ($gestures -contains $delName) {
-                $delScript = "import pickle`nf=open(r'$pkl','rb');g=pickle.load(f);f.close();g.pop('$delName',None);f=open(r'$pkl','wb');pickle.dump(g,f);f.close();print('DELETED')"
+                $delScript = @"
+import pickle
+with open(r'$pkl', 'rb') as f:
+    g = pickle.load(f)
+g.pop('$delName', None)
+with open(r'$pkl', 'wb') as f:
+    pickle.dump(g, f)
+print('DELETED')
+"@
                 $res = & $PY312_PATH -c $delScript 2>&1
                 if ($res -contains "DELETED") {
-                    Write-Green "✓ Deleted: '$delName'"
+                    Write-Green "✓ Deleted gesture: '$delName'"
                 } else {
                     Write-Red "Error deleting gesture!"
                 }
@@ -140,21 +165,19 @@ $alreadyInstalled = (Test-Path "$INSTALL_DIR\collect_gestures.py") -and
                     (Test-Path "$INSTALL_DIR\hand_landmarker.task")
 
 if (-not $alreadyInstalled) {
-
     Clear-Host
     Write-Cyan "============================================"
     Write-Cyan "   DSP Hand Gesture Controller - Setup"
     Write-Cyan "============================================"
     Write-Host ""
 
-    # ── 1. Create folder ─────────────────────────────────────
     if (-not (Test-Path $INSTALL_DIR)) {
         New-Item -ItemType Directory -Path $INSTALL_DIR | Out-Null
         Write-Green "[+] Created folder: $INSTALL_DIR"
     }
     Set-Location $INSTALL_DIR
 
-    # ── 2. Python 3.12 ───────────────────────────────────────
+    # Python 3.12
     Write-Host ""
     Write-Cyan "[*] Checking for Python 3.12..."
     if (Test-Path $PY312_PATH) {
@@ -176,7 +199,7 @@ if (-not $alreadyInstalled) {
         }
     }
 
-    # ── 3. Download files ────────────────────────────────────
+    # Download files
     Write-Host ""
     Write-Cyan "[*] Downloading project files..."
     foreach ($file in @("collect_gestures.py","dsp_hand_gesture_ppt.py","hand_landmarker.task")) {
@@ -186,7 +209,7 @@ if (-not $alreadyInstalled) {
         } catch { Write-Red "[!] Failed: $file" }
     }
 
-    # ── 4. Save version ──────────────────────────────────────
+    # Save version
     try {
         $v = (Invoke-WebRequest -Uri $VERSION_URL -UseBasicParsing -ErrorAction Stop).Content.Trim()
         $v | Out-File -FilePath $VERSION_FILE -Encoding UTF8 -Force
@@ -194,7 +217,7 @@ if (-not $alreadyInstalled) {
         "1.0" | Out-File -FilePath $VERSION_FILE -Encoding UTF8 -Force
     }
 
-    # ── 5. Install dependencies ──────────────────────────────
+    # Install pip packages
     Write-Host ""
     Write-Cyan "[*] Installing Python dependencies..."
     foreach ($dep in @("opencv-python","mediapipe","numpy","imageio","pyautogui")) {
@@ -203,20 +226,16 @@ if (-not $alreadyInstalled) {
     }
     Write-Green "[+] All dependencies installed."
 
-    # ── 6. Create launcher.ps1 ───────────────────────────────
-    $launcherScript = "$REPO_RAW/setup.ps1"
-    ". { iwr -useb $launcherScript } | iex" | Out-File -FilePath $LAUNCHER -Encoding UTF8
-    Write-Green "[+] Launcher created."
-
-    # ── 7. Desktop Shortcut ──────────────────────────────────
+    # Desktop Shortcut — points back to this script on GitHub
     Write-Host ""
     Write-Cyan "[*] Creating desktop shortcut..."
+    $launcherCmd  = "-ExecutionPolicy Bypass -Command `". { iwr -useb $REPO_RAW/setup.ps1 } | iex`""
     $desktopPath  = [System.Environment]::GetFolderPath("Desktop")
     $shortcutPath = "$desktopPath\DSP Gesture Controller.lnk"
     $shell        = New-Object -ComObject WScript.Shell
     $shortcut     = $shell.CreateShortcut($shortcutPath)
     $shortcut.TargetPath       = "powershell.exe"
-    $shortcut.Arguments        = "-ExecutionPolicy Bypass -Command `". { iwr -useb $launcherScript } | iex`""
+    $shortcut.Arguments        = $launcherCmd
     $shortcut.WorkingDirectory = $INSTALL_DIR
     $shortcut.WindowStyle      = 1
     $shortcut.Description      = "DSP Hand Gesture Controller"
@@ -232,7 +251,7 @@ if (-not $alreadyInstalled) {
 
 Set-Location $INSTALL_DIR
 
-# ── Auto Update Check (every launch) ────────────────────────
+# ── Check updates every launch ───────────────────────────────
 Clear-Host
 Write-Cyan "============================================"
 Write-Cyan "   DSP GESTURE CONTROLLER"
@@ -241,16 +260,37 @@ Write-Host ""
 Write-Cyan "[*] Checking for updates..."
 Check-ForUpdates
 
-# ── Run Menu ─────────────────────────────────────────────────
+# ── Main Menu Loop ───────────────────────────────────────────
 while ($true) {
     Show-Menu
     $choice = Read-Host "Enter your choice (1/2/3/4)"
     switch ($choice) {
-        "1" { Write-Green "`n[>] Launching Recorder..."; Write-Yellow "    R=Record | S=Save | Q=Quit"; & $PY312_PATH "$INSTALL_DIR\collect_gestures.py" }
-        "2" { Write-Green "`n[>] Launching PPT Controller..."; Write-Yellow "    Press Q to quit."; & $PY312_PATH "$INSTALL_DIR\dsp_hand_gesture_ppt.py" }
-        "3" { Manage-Gestures }
-        "4" { Write-Cyan "`nGoodbye!"; exit 0 }
-        default { Write-Red "Invalid! Enter 1, 2, 3 or 4." }
+        "1" {
+            Write-Green "`n[>] Launching Recorder..."
+            Write-Yellow "    R=Record | S=Save | Q=Quit"
+            Write-Host ""
+            & $PY312_PATH "$INSTALL_DIR\collect_gestures.py"
+        }
+        "2" {
+            Write-Green "`n[>] Launching PPT Controller (Background)..."
+            Write-Yellow "    Camera runs hidden — gesture away!"
+            Write-Yellow "    Press CTRL+C here to stop."
+            Write-Host ""
+            & $PY312_PATH "$INSTALL_DIR\dsp_hand_gesture_ppt.py"
+        }
+        "3" {
+            Manage-Gestures
+        }
+        "4" {
+            Write-Cyan "`nGoodbye!"
+            exit 0
+        }
+        default {
+            Write-Red "Invalid! Enter 1, 2, 3 or 4."
+        }
     }
-    if ($choice -ne "3") { Write-Host ""; Read-Host "Press Enter to return to menu..." }
+    if ($choice -ne "3") {
+        Write-Host ""
+        Read-Host "Press Enter to return to menu..."
+    }
 }
