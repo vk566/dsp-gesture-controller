@@ -3,9 +3,9 @@
 #  Usage: irm https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main/setup.ps1 | iex
 # ============================================================
 
-$REPO_RAW  = "https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main"
+$REPO_RAW    = "https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main"
 $INSTALL_DIR = "$env:USERPROFILE\DSPGestureController"
-$LAUNCHER  = "$INSTALL_DIR\launcher.ps1"
+$LAUNCHER    = "$INSTALL_DIR\launcher.ps1"
 
 # ── Colours ─────────────────────────────────────────────────
 function Write-Green  { param($m) Write-Host $m -ForegroundColor Green }
@@ -26,15 +26,12 @@ function Show-Menu {
     Write-Host ""
 }
 
-# ── Already installed? Skip setup, go straight to menu ──────
+# ── Already installed? Skip setup ───────────────────────────
 $alreadyInstalled = (Test-Path "$INSTALL_DIR\collect_gestures.py") -and
                     (Test-Path "$INSTALL_DIR\dsp_hand_gesture_ppt.py") -and
                     (Test-Path "$INSTALL_DIR\hand_landmarker.task")
 
-if ($alreadyInstalled) {
-    Write-Green "Already installed! Launching menu..."
-    Set-Location $INSTALL_DIR
-} else {
+if (-not $alreadyInstalled) {
 
     Clear-Host
     Write-Cyan "============================================"
@@ -49,35 +46,88 @@ if ($alreadyInstalled) {
     }
     Set-Location $INSTALL_DIR
 
-    # ── 2. Check Python ──────────────────────────────────────
+    # ── 2. Check Python & Auto Install if missing ────────────
     Write-Host ""
     Write-Cyan "[*] Checking Python..."
-    try {
-        $pyver = python --version 2>&1
-        Write-Green "[+] Found: $pyver"
-    } catch {
-        Write-Red "[!] Python not found. Please install Python and re-run."
-        pause; exit 1
+
+    $pythonCmd = $null
+    foreach ($cmd in @("python","python3","py")) {
+        try {
+            $ver = & $cmd --version 2>&1
+            if ($ver -match "Python") {
+                $pythonCmd = $cmd
+                Write-Green "[+] Found: $ver (command: $cmd)"
+                break
+            }
+        } catch {}
     }
 
-    # ── 3. Download files ────────────────────────────────────
+    if (-not $pythonCmd) {
+        Write-Yellow "[!] Python not found. Auto-installing Python 3.12..."
+        Write-Host ""
+
+        $pyInstaller = "$env:TEMP\python-3.12.0-amd64.exe"
+        $pyURL       = "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe"
+
+        Write-Cyan "[*] Downloading Python 3.12.0 installer..."
+        Invoke-WebRequest -Uri $pyURL -OutFile $pyInstaller
+        Write-Green "[+] Download complete."
+
+        Write-Cyan "[*] Installing Python 3.12.0 silently..."
+        Start-Process -FilePath $pyInstaller -ArgumentList `
+            "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1 Include_launcher=1" `
+            -Wait
+        Write-Green "[+] Python installed!"
+
+        # ── Refresh PATH so python is found immediately ──────
+        $userPath    = [System.Environment]::GetEnvironmentVariable("PATH","User")
+        $machinePath = [System.Environment]::GetEnvironmentVariable("PATH","Machine")
+        $env:PATH    = "$userPath;$machinePath"
+
+        # ── Also add Python paths manually just in case ──────
+        $pyPaths = @(
+            "$env:LOCALAPPDATA\Programs\Python\Python312",
+            "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts"
+        )
+        foreach ($p in $pyPaths) {
+            if (Test-Path $p) {
+                $env:PATH = "$p;$env:PATH"
+                Write-Green "[+] Added to PATH: $p"
+            }
+        }
+
+        # ── Verify install ───────────────────────────────────
+        try {
+            $ver = python --version 2>&1
+            Write-Green "[+] Verified: $ver"
+            $pythonCmd = "python"
+        } catch {
+            Write-Red "[!] Python install failed. Please install manually from https://python.org"
+            pause; exit 1
+        }
+
+        # Cleanup installer
+        Remove-Item $pyInstaller -Force -ErrorAction SilentlyContinue
+    }
+
+    # ── 3. Download project files ────────────────────────────
     Write-Host ""
-    Write-Cyan "[*] Downloading project files..."
+    Write-Cyan "[*] Downloading project files from GitHub..."
     foreach ($file in @("collect_gestures.py","dsp_hand_gesture_ppt.py","hand_landmarker.task")) {
         try {
             Invoke-WebRequest -Uri "$REPO_RAW/$file" -OutFile "$INSTALL_DIR\$file" -ErrorAction Stop
             Write-Green "[+] Downloaded: $file"
         } catch {
-            Write-Red "[!] Failed: $file"
+            Write-Red "[!] Failed to download: $file"
         }
     }
 
-    # ── 4. Install dependencies ──────────────────────────────
+    # ── 4. Install Python dependencies ───────────────────────
     Write-Host ""
     Write-Cyan "[*] Installing Python dependencies..."
     foreach ($dep in @("opencv-python","mediapipe","numpy","imageio","pyautogui")) {
         Write-Host "    Installing $dep ..."
-        python -m pip install $dep --quiet
+        & $pythonCmd -m pip install $dep --quiet
     }
     Write-Green "[+] All dependencies installed."
 
@@ -85,6 +135,14 @@ if ($alreadyInstalled) {
     $launcherCode = @'
 $INSTALL_DIR = "$env:USERPROFILE\DSPGestureController"
 Set-Location $INSTALL_DIR
+# Ensure Python is in PATH
+$pyPaths = @(
+    "$env:LOCALAPPDATA\Programs\Python\Python312",
+    "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts"
+)
+foreach ($p in $pyPaths) {
+    if (Test-Path $p) { $env:PATH = "$p;$env:PATH" }
+}
 function Write-Green  { param($m) Write-Host $m -ForegroundColor Green }
 function Write-Cyan   { param($m) Write-Host $m -ForegroundColor Cyan }
 function Write-Yellow { param($m) Write-Host $m -ForegroundColor Yellow }
@@ -106,7 +164,8 @@ while ($true) {
         "3" { Write-Cyan "`nGoodbye!"; exit 0 }
         default { Write-Red "Invalid! Enter 1, 2 or 3." }
     }
-    Write-Host ""; Read-Host "Press Enter to return to menu..."
+    Write-Host ""
+    Read-Host "Press Enter to return to menu..."
 }
 '@
     $launcherCode | Out-File -FilePath $LAUNCHER -Encoding UTF8
@@ -115,17 +174,17 @@ while ($true) {
     # ── 6. Create Desktop Shortcut ───────────────────────────
     Write-Host ""
     Write-Cyan "[*] Creating desktop shortcut..."
-    $desktopPath = [System.Environment]::GetFolderPath("Desktop")
+    $desktopPath  = [System.Environment]::GetFolderPath("Desktop")
     $shortcutPath = "$desktopPath\DSP Gesture Controller.lnk"
-    $shell = New-Object -ComObject WScript.Shell
-    $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = "powershell.exe"
-    $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$LAUNCHER`""
+    $shell        = New-Object -ComObject WScript.Shell
+    $shortcut     = $shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath      = "powershell.exe"
+    $shortcut.Arguments       = "-ExecutionPolicy Bypass -File `"$LAUNCHER`""
     $shortcut.WorkingDirectory = $INSTALL_DIR
-    $shortcut.WindowStyle = 1
-    $shortcut.Description = "DSP Hand Gesture Controller"
+    $shortcut.WindowStyle     = 1
+    $shortcut.Description     = "DSP Hand Gesture Controller"
     $shortcut.Save()
-    Write-Green "[+] Desktop shortcut created: 'DSP Gesture Controller'"
+    Write-Green "[+] Desktop shortcut created!"
 
     Write-Host ""
     Write-Green "============================================"
@@ -134,6 +193,8 @@ while ($true) {
     Write-Host ""
     Start-Sleep -Seconds 2
 }
+
+Set-Location $INSTALL_DIR
 
 # ── Run Menu ─────────────────────────────────────────────────
 while ($true) {
