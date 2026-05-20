@@ -29,7 +29,6 @@ class EasyDSPController:
         self.last_action_time = 0
         self.is_locked        = False
 
-        # DSP: IIR Filter
         self.prev_smooth = None
         self.alpha       = 0.5
 
@@ -48,6 +47,17 @@ class EasyDSPController:
         self.prev_smooth = smoothed
         return smoothed.tolist()
 
+    # ── Detect front or back of hand ──────────────────────────
+    def get_hand_orientation(self, landmarks):
+        lm     = np.array(landmarks)
+        wrist  = lm[0]
+        index  = lm[5]
+        pinky  = lm[17]
+        v1     = index - wrist
+        v2     = pinky - wrist
+        cross_z = v1[0] * v2[1] - v1[1] * v2[0]
+        return 1.0 if cross_z > 0 else 0.0
+
     def extract_finger_features(self, landmarks):
         lm = np.array(landmarks)
         features = []
@@ -59,16 +69,13 @@ class EasyDSPController:
             features.append(lm[tip][1] - lm[mcp][1])
         for i in range(len(FINGER_TIPS) - 1):
             features.append(np.linalg.norm(lm[FINGER_TIPS[i]] - lm[FINGER_TIPS[i+1]]))
+        # ── Add orientation as feature ─────────────────────────
+        features.append(self.get_hand_orientation(landmarks))
         return features
 
     def recognize_gesture(self):
         if not self.gestures or len(self.current_seq) < 20:
             return "None"
-
-        y_start      = np.array(self.current_seq[0])[:21*3].reshape(21,3)[0][1]
-        y_end        = np.array(self.current_seq[-1])[:21*3].reshape(21,3)[0][1]
-        total_y_move = abs(y_end - y_start)
-        is_moving_up = y_end < y_start
 
         best_score = float('inf')
         best_name  = "None"
@@ -84,11 +91,6 @@ class EasyDSPController:
                     best_score = score
                     best_name  = name
 
-        if "next" in best_name:
-            if not is_moving_up or total_y_move < 0.05: return "None"
-        if "previous" in best_name:
-            if is_moving_up or total_y_move < 0.05: return "None"
-
         return best_name
 
     def execute_command(self, name):
@@ -96,13 +98,13 @@ class EasyDSPController:
         if "next" in n:
             pyautogui.press('right')
             print(">>> [NEXT SLIDE]")
-        elif "previous" in n:
+        elif "previous" in n or "prev" in n or "back" in n:
             pyautogui.press('left')
             print("<<< [PREVIOUS SLIDE]")
         elif "start" in n:
             pyautogui.press('f5')
             print("▶ [START SLIDESHOW]")
-        elif "exit" in n:
+        elif "exit" in n or "stop" in n:
             pyautogui.press('esc')
             print("⏹ [EXIT SLIDESHOW]")
 
@@ -110,7 +112,7 @@ class EasyDSPController:
         cap = cv2.VideoCapture(0)
         print("\n✅ DSP CONTROLLER ACTIVE (Running in background)")
         print("   Camera is ON but hidden — gesture away!")
-        print("   Press CTRL+C in this window to stop.\n")
+        print("   Press CTRL+C here to stop.\n")
 
         try:
             while True:
@@ -125,6 +127,7 @@ class EasyDSPController:
                     raw      = [[lm.x, lm.y, lm.z] for lm in result.hand_landmarks[0]]
                     smooth   = self.apply_iir(raw)
                     features = self.extract_finger_features(smooth)
+
                     self.current_seq.append(features)
                     if len(self.current_seq) > 25:
                         self.current_seq.pop(0)
@@ -142,10 +145,8 @@ class EasyDSPController:
                     self.prev_smooth = None
                     self.is_locked   = False
 
-                # ── NO cv2.imshow — runs silently in background ──
-                # Just check for key press to quit (optional)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                # No window shown — background mode
+                cv2.waitKey(1)
 
         except KeyboardInterrupt:
             print("\n⏹ Controller stopped.")
