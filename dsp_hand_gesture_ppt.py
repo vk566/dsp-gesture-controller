@@ -142,11 +142,11 @@ class EasyDSPController:
         middle_dist = np.linalg.norm(lm[12] - wrist)
         ring_dist   = np.linalg.norm(lm[16] - wrist)
         pinky_dist  = np.linalg.norm(lm[20] - wrist)
-        index_extended  = index_dist > 0.25
-        middle_curled   = middle_dist < 0.20
-        ring_curled     = ring_dist   < 0.20
-        pinky_curled    = pinky_dist  < 0.20
-        index_dominant  = index_dist > (middle_dist * 1.4)
+        index_extended  = index_dist > 0.22
+        middle_curled   = middle_dist < 0.12
+        ring_curled     = ring_dist   < 0.12
+        pinky_curled    = pinky_dist  < 0.12
+        index_dominant  = index_dist > (middle_dist * 2.0)
         return index_extended and middle_curled and ring_curled and pinky_curled and index_dominant
 
     # ── Check if live drawn path matches saved key ────────────
