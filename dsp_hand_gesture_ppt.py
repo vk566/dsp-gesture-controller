@@ -134,14 +134,20 @@ class EasyDSPController:
         features.append(1.0 if hand_label == "Right" else 0.0)
         return features
 
-    # ── Check if index finger is pointing ────────────────────
+    # ── Check if ONLY index finger is pointing ───────────────
     def is_index_pointing(self, landmarks):
         lm = np.array(landmarks)
-        index_extended = np.linalg.norm(lm[8] - lm[5]) > 0.08
-        middle_curled  = np.linalg.norm(lm[12] - lm[9])  < 0.08
-        ring_curled    = np.linalg.norm(lm[16] - lm[13]) < 0.08
-        pinky_curled   = np.linalg.norm(lm[20] - lm[17]) < 0.08
-        return index_extended and middle_curled and ring_curled and pinky_curled
+        wrist = lm[0]
+        index_dist  = np.linalg.norm(lm[8]  - wrist)
+        middle_dist = np.linalg.norm(lm[12] - wrist)
+        ring_dist   = np.linalg.norm(lm[16] - wrist)
+        pinky_dist  = np.linalg.norm(lm[20] - wrist)
+        index_extended  = index_dist > 0.25
+        middle_curled   = middle_dist < 0.20
+        ring_curled     = ring_dist   < 0.20
+        pinky_curled    = pinky_dist  < 0.20
+        index_dominant  = index_dist > (middle_dist * 1.4)
+        return index_extended and middle_curled and ring_curled and pinky_curled and index_dominant
 
     # ── Check if live drawn path matches saved key ────────────
     def check_unlock(self):

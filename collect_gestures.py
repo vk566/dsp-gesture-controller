@@ -61,17 +61,30 @@ class DSPGestureTrainer:
         cross_z = v1[0] * v2[1] - v1[1] * v2[0]
         return 1.0 if cross_z > 0 else 0.0
 
-    # ── Check if index finger is pointing (extended) ──────────
-    # Index tip (8) must be extended, other fingers curled
+    # ── Check if ONLY index finger is pointing ───────────────
+    # Index tip must be FAR from wrist
+    # Middle, ring, pinky tips must be CLOSE to wrist (fully curled)
     def is_index_pointing(self, landmarks):
         lm = np.array(landmarks)
-        # Index finger extended: tip higher than base
-        index_extended = np.linalg.norm(lm[8] - lm[5]) > 0.08
-        # Middle, ring, pinky must be curled
-        middle_curled  = np.linalg.norm(lm[12] - lm[9])  < 0.08
-        ring_curled    = np.linalg.norm(lm[16] - lm[13]) < 0.08
-        pinky_curled   = np.linalg.norm(lm[20] - lm[17]) < 0.08
-        return index_extended and middle_curled and ring_curled and pinky_curled
+        wrist = lm[0]
+
+        # Distance of each fingertip from wrist
+        index_dist  = np.linalg.norm(lm[8]  - wrist)
+        middle_dist = np.linalg.norm(lm[12] - wrist)
+        ring_dist   = np.linalg.norm(lm[16] - wrist)
+        pinky_dist  = np.linalg.norm(lm[20] - wrist)
+        thumb_dist  = np.linalg.norm(lm[4]  - wrist)
+
+        # Index must be clearly extended (far from wrist)
+        index_extended  = index_dist > 0.25
+        # All others must be clearly curled (close to wrist)
+        middle_curled   = middle_dist < 0.20
+        ring_curled     = ring_dist   < 0.20
+        pinky_curled    = pinky_dist  < 0.20
+        # Index must be significantly longer than middle
+        index_dominant  = index_dist > (middle_dist * 1.4)
+
+        return index_extended and middle_curled and ring_curled and pinky_curled and index_dominant
 
     def extract_features(self, landmarks, hand_label):
         lm = np.array(landmarks)
