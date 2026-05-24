@@ -1,9 +1,9 @@
 # ============================================================
 #  DSP Hand Gesture Controller - Setup & Launcher
-#  Usage: irm https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main/setup.ps1 | iex
+#  Usage: irm https://raw.githubusercontent.com/VK-Innovate/dsp-gesture-controller/main/setup.ps1 | iex
 # ============================================================
 
-$REPO_RAW     = "https://raw.githubusercontent.com/vk566/dsp-gesture-controller/main"
+$REPO_RAW = "https://raw.githubusercontent.com/VK-Innovate/dsp-gesture-controller/main"
 $INSTALL_DIR  = "$env:USERPROFILE\DSPGestureController"
 $LAUNCHER     = "$INSTALL_DIR\launcher.ps1"
 $PY312_PATH   = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
