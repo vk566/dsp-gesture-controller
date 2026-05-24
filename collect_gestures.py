@@ -29,13 +29,13 @@ class DSPGestureTrainer:
         self.fir_window        = 3
 
         # ── Air Draw Lock ─────────────────────────────────────
-        self.is_drawing_key    = False
-        self.air_draw_path     = []   # raw fingertip path
-        self.fir_draw_buffer   = []   # FIR buffer for drawing
+        self.is_drawing_key  = False
+        self.air_draw_path   = []
+        self.fir_draw_buffer = []
+        self.last_point      = None  # to avoid duplicate points
 
         self.load_gestures()
 
-    # ── FIR for gesture landmarks ─────────────────────────────
     def apply_fir_filter(self, landmarks, hand_key):
         if hand_key not in self.fir_buffers:
             self.fir_buffers[hand_key] = []
@@ -45,13 +45,12 @@ class DSPGestureTrainer:
             buf.pop(0)
         return np.mean(buf, axis=0).tolist()
 
-    # ── FIR for air drawing path ──────────────────────────────
-    # Formula: y[n] = (x[n] + x[n-1] + x[n-2]) / 3
+    # ── FIR for drawing path ──────────────────────────────────
+    # y[n] = (x[n] + x[n-1] + x[n-2]) / 3
     def apply_fir_to_point(self, point):
         self.fir_draw_buffer.append(point)
         if len(self.fir_draw_buffer) > self.fir_window:
             self.fir_draw_buffer.pop(0)
-        # Average of last M points
         arr = np.array(self.fir_draw_buffer)
         return tuple(np.mean(arr, axis=0).tolist())
 
@@ -61,6 +60,18 @@ class DSPGestureTrainer:
         v2      = lm[17] - lm[0]
         cross_z = v1[0] * v2[1] - v1[1] * v2[0]
         return 1.0 if cross_z > 0 else 0.0
+
+    # ── Check if index finger is pointing (extended) ──────────
+    # Index tip (8) must be extended, other fingers curled
+    def is_index_pointing(self, landmarks):
+        lm = np.array(landmarks)
+        # Index finger extended: tip higher than base
+        index_extended = np.linalg.norm(lm[8] - lm[5]) > 0.08
+        # Middle, ring, pinky must be curled
+        middle_curled  = np.linalg.norm(lm[12] - lm[9])  < 0.08
+        ring_curled    = np.linalg.norm(lm[16] - lm[13]) < 0.08
+        pinky_curled   = np.linalg.norm(lm[20] - lm[17]) < 0.08
+        return index_extended and middle_curled and ring_curled and pinky_curled
 
     def extract_features(self, landmarks, hand_label):
         lm = np.array(landmarks)
@@ -86,13 +97,13 @@ class DSPGestureTrainer:
             pickle.dump(self.gestures, f)
 
     def save_lock_key(self, path):
-        # Normalize path to 0-1 range for scale independence
         path_arr = np.array(path)
+        # Normalize
         path_arr[:,0] = (path_arr[:,0] - path_arr[:,0].min()) / (path_arr[:,0].max() - path_arr[:,0].min() + 1e-6)
         path_arr[:,1] = (path_arr[:,1] - path_arr[:,1].min()) / (path_arr[:,1].max() - path_arr[:,1].min() + 1e-6)
-        # Resample to 50 points for consistent comparison
-        indices  = np.linspace(0, len(path_arr)-1, 50).astype(int)
-        sampled  = path_arr[indices]
+        # Resample to 50 points
+        indices = np.linspace(0, len(path_arr)-1, 50).astype(int)
+        sampled = path_arr[indices]
         with open("lock_key.pkl", "wb") as f:
             pickle.dump(sampled.tolist(), f)
         print("🔑 Lock key saved!")
@@ -140,6 +151,13 @@ if __name__ == "__main__":
     print("║  S  = Save gesture                       ║")
     print("║  K  = Record secret air-draw lock key    ║")
     print("║  Q  = Quit                               ║")
+    print("╠══════════════════════════════════════════╣")
+    print("║  HOW TO DRAW SECRET KEY:                 ║")
+    print("║  1. Press K to start                     ║")
+    print("║  2. Point ONLY index finger              ║")
+    print("║  3. Draw your pattern in air             ║")
+    print("║  4. Curl all fingers to STOP drawing     ║")
+    print("║  5. Press K to save                      ║")
     print("╚══════════════════════════════════════════╝\n")
 
     while True:
@@ -164,7 +182,6 @@ if __name__ == "__main__":
             smooth   = system.apply_fir_filter(raw, hand_label)
             features = system.extract_features(smooth, hand_label)
             frame_features.extend(features)
-
             system.draw_landmarks(display, smooth)
 
             orient       = system.get_hand_orientation(smooth)
@@ -186,25 +203,42 @@ if __name__ == "__main__":
                     cv2.putText(display, f"{finger_names[i]}: {state}",
                                 (10, 30+i*22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            # ── Air draw: track index fingertip (point 8) ─────
+            # ── Air draw: ONLY when index is pointing ─────────
             if system.is_drawing_key:
-                tip_x = smooth[8][0]
-                tip_y = smooth[8][1]
-                # Apply FIR to smooth the drawing path
-                # y[n] = (x[n] + x[n-1] + x[n-2]) / 3
-                smooth_pt = system.apply_fir_to_point((tip_x, tip_y))
-                system.air_draw_path.append(smooth_pt)
-                # Draw the path on screen
-                for pi in range(1, len(system.air_draw_path)):
-                    p1 = (int(system.air_draw_path[pi-1][0]*640),
-                          int(system.air_draw_path[pi-1][1]*480))
-                    p2 = (int(system.air_draw_path[pi][0]*640),
-                          int(system.air_draw_path[pi][1]*480))
-                    cv2.line(display, p1, p2, (0,0,255), 3)
-                # Show fingertip dot
-                cv2.circle(display,
-                           (int(smooth_pt[0]*640), int(smooth_pt[1]*480)),
-                           8, (0,0,255), -1)
+                pointing = system.is_index_pointing(smooth)
+
+                if pointing:
+                    tip_x     = smooth[8][0]
+                    tip_y     = smooth[8][1]
+                    # FIR smooth: y[n] = (x[n] + x[n-1] + x[n-2]) / 3
+                    smooth_pt = system.apply_fir_to_point((tip_x, tip_y))
+
+                    # Only add if moved enough (avoid duplicate points)
+                    if system.last_point is None or \
+                       np.linalg.norm(np.array(smooth_pt) - np.array(system.last_point)) > 0.01:
+                        system.air_draw_path.append(smooth_pt)
+                        system.last_point = smooth_pt
+
+                    # Draw path on screen
+                    for pi in range(1, len(system.air_draw_path)):
+                        p1 = (int(system.air_draw_path[pi-1][0]*640),
+                              int(system.air_draw_path[pi-1][1]*480))
+                        p2 = (int(system.air_draw_path[pi][0]*640),
+                              int(system.air_draw_path[pi][1]*480))
+                        cv2.line(display, p1, p2, (0,0,255), 3)
+
+                    # Show fingertip dot in red
+                    cv2.circle(display,
+                               (int(smooth[8][0]*640), int(smooth[8][1]*480)),
+                               10, (0,0,255), -1)
+
+                    # Show drawing status
+                    cv2.putText(display, "✏ DRAWING...",
+                                (220, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 3)
+                else:
+                    # Index not pointing — show pause status
+                    cv2.putText(display, "✋ CURL TO PAUSE",
+                                (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,150,255), 2)
 
         if frame_features and system.is_recording:
             system.current_recording.append(frame_features)
@@ -212,33 +246,32 @@ if __name__ == "__main__":
 
         # Recording indicator
         if system.is_recording:
-            cv2.putText(display, "● RECORDING GESTURE", (350, 30),
+            cv2.putText(display, "● RECORDING GESTURE", (300, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
             cv2.putText(display, f"Frames: {len(system.current_recording)}",
-                        (350,55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,200), 1)
+                        (300,55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,200), 1)
 
-        # Air draw indicator
+        # Air draw mode indicator
         if system.is_drawing_key:
-            cv2.putText(display, "✏ DRAWING SECRET KEY", (300, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,0,0), 2)
-            cv2.putText(display, f"Points: {len(system.air_draw_path)}",
-                        (300,55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,0,0), 1)
+            cv2.putText(display, f"KEY MODE ON | Points: {len(system.air_draw_path)}",
+                        (150, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,0,0), 2)
+            cv2.putText(display, "Point index finger to draw | Press K to save",
+                        (60, 440), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,0,0), 1)
 
         # Lock key status
         lock_exists = os.path.exists("lock_key.pkl")
         lock_color  = (0,200,0) if lock_exists else (0,0,200)
-        lock_text   = "Lock Key: SET ✓" if lock_exists else "Lock Key: NOT SET"
-        cv2.putText(display, lock_text, (10,460),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, lock_color, 1)
+        lock_text   = "Lock Key: SET ✓" if lock_exists else "Lock Key: NOT SET — Press K"
+        cv2.putText(display, lock_text,
+                    (10,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, lock_color, 1)
         cv2.putText(display, f"Gestures: {len(system.gestures)}",
-                    (400,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100,100,100), 1)
+                    (480,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100,100,100), 1)
 
         cv2.imshow("DSP Trainer", display)
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('q'):
             break
-
         elif key == ord('r'):
             system.is_recording = not system.is_recording
             if system.is_recording:
@@ -246,7 +279,6 @@ if __name__ == "__main__":
                 print("▶ Recording gesture started...")
             else:
                 print(f"⏹ Stopped. ({len(system.current_recording)} frames)")
-
         elif key == ord('s') and system.current_recording:
             name = input("Enter Gesture Name: ").strip().lower()
             if name:
@@ -257,14 +289,14 @@ if __name__ == "__main__":
                 imageio.mimsave(f"{name}.gif",
                     [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in system.frames_for_gif[::2]], fps=15)
                 print(f"✅ Saved: '{name}' ({len(system.gestures[name])} samples)")
-
         elif key == ord('k'):
-            # Toggle air draw key recording
             system.is_drawing_key = not system.is_drawing_key
             if system.is_drawing_key:
                 system.air_draw_path   = []
                 system.fir_draw_buffer = []
-                print("✏ Draw your secret pattern in air... Press K again to save")
+                system.last_point      = None
+                print("✏ Draw mode ON — point index finger and draw your secret pattern!")
+                print("   Curl fingers to pause drawing. Press K again to save.")
             else:
                 if len(system.air_draw_path) > 10:
                     system.save_lock_key(system.air_draw_path)
