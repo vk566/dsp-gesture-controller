@@ -11,35 +11,6 @@ from mediapipe.tasks.python import vision
 FINGER_TIPS  = [4, 8, 12, 16, 20]
 FINGER_BASES = [2, 5,  9, 13, 17]
 
-# ── DTW Algorithm ─────────────────────────────────────────────
-# Formula: DTW(i,j) = dist(i,j) + min(DTW(i-1,j), DTW(i,j-1), DTW(i-1,j-1))
-def dtw_distance(path1, path2):
-    p1 = np.array(path1)
-    p2 = np.array(path2)
-    n, m = len(p1), len(p2)
-    # Initialize DTW matrix with infinity
-    dtw = np.full((n+1, m+1), np.inf)
-    dtw[0, 0] = 0
-    for i in range(1, n+1):
-        for j in range(1, m+1):
-            # Euclidean distance between two points
-            dist = np.linalg.norm(p1[i-1] - p2[j-1])
-            # DTW recurrence formula
-            dtw[i,j] = dist + min(
-                dtw[i-1, j],     # insertion
-                dtw[i, j-1],     # deletion
-                dtw[i-1, j-1]    # match
-            )
-    return dtw[n, m]
-
-# ── Normalize + resample path to 50 points ───────────────────
-def normalize_path(path):
-    arr = np.array(path)
-    arr[:,0] = (arr[:,0] - arr[:,0].min()) / (arr[:,0].max() - arr[:,0].min() + 1e-6)
-    arr[:,1] = (arr[:,1] - arr[:,1].min()) / (arr[:,1].max() - arr[:,1].min() + 1e-6)
-    indices  = np.linspace(0, len(arr)-1, 50).astype(int)
-    return arr[indices].tolist()
-
 class EasyDSPController:
     def __init__(self):
         base_dir   = os.path.dirname(os.path.abspath(__file__))
@@ -50,21 +21,22 @@ class EasyDSPController:
             num_hands=2,
             min_hand_detection_confidence=0.7
         )
-        self.detector = vision.HandLandmarker.create_from_options(options)
-
+        self.detector         = vision.HandLandmarker.create_from_options(options)
         self.gestures         = self.load_gestures()
-        self.lock_key         = self.load_lock_key()
+        self.biolock          = self.load_biolock()
 
         # ── Lock state ────────────────────────────────────────
-        self.is_unlocked      = False
+        self.is_unlocked      = False if self.biolock else True
         self.unlock_time      = None
-        self.AUTO_LOCK_SECS   = 300   # auto lock after 5 minutes idle
+        self.AUTO_LOCK_SECS   = 300  # 5 min idle auto lock
 
-        # ── Air draw for unlock ───────────────────────────────
-        self.is_drawing       = False
-        self.live_path        = []
-        self.iir_draw_prev    = None  # IIR previous value for drawing
-        self.alpha_draw       = 0.5   # IIR alpha for drawing
+        # ── Bio check buffer ──────────────────────────────────
+        # Collect frames and check simultaneously
+        self.bio_check_frames  = []
+        self.BIO_CHECK_COUNT   = 60   # check over 2 seconds
+        self.BIO_THRESHOLD     = 0.15 # how similar hand must be
+        self.check_result_msg  = ""
+        self.check_result_time = 0
 
         # ── Gesture control ───────────────────────────────────
         self.current_seq      = []
@@ -77,21 +49,19 @@ class EasyDSPController:
         self.iir_prev = {}
         self.alpha    = 0.5
 
-        self.DTW_THRESHOLD = 0.25   # lower = stricter match
-
     def load_gestures(self):
         if os.path.exists("clean_gestures.pkl"):
             with open("clean_gestures.pkl", "rb") as f:
                 return pickle.load(f)
         return {}
 
-    def load_lock_key(self):
-        if os.path.exists("lock_key.pkl"):
-            with open("lock_key.pkl", "rb") as f:
+    def load_biolock(self):
+        if os.path.exists("biolock.pkl"):
+            with open("biolock.pkl", "rb") as f:
                 return pickle.load(f)
         return None
 
-    # ── IIR for gesture landmarks ─────────────────────────────
+    # ── IIR filter for gesture landmarks ─────────────────────
     # Formula: y[n] = α*x[n] + (1-α)*y[n-1]
     def apply_iir(self, raw, hand_key):
         raw = np.array(raw)
@@ -102,24 +72,31 @@ class EasyDSPController:
         self.iir_prev[hand_key] = smoothed
         return smoothed.tolist()
 
-    # ── IIR for live air drawing ──────────────────────────────
-    # Formula: y[n] = α*x[n] + (1-α)*y[n-1]
-    def apply_iir_draw(self, point):
-        pt = np.array(point)
-        if self.iir_draw_prev is None:
-            self.iir_draw_prev = pt
-            return tuple(pt.tolist())
-        smoothed           = (self.alpha_draw * pt) + ((1 - self.alpha_draw) * self.iir_draw_prev)
-        self.iir_draw_prev = smoothed
-        return tuple(smoothed.tolist())
-
-    def get_hand_orientation(self, landmarks):
+    def get_hand_orientation(self, landmarks, hand_label):
         lm      = np.array(landmarks)
         v1      = lm[5]  - lm[0]
         v2      = lm[17] - lm[0]
         cross_z = v1[0] * v2[1] - v1[1] * v2[0]
-        return 1.0 if cross_z > 0 else 0.0
+        if hand_label == "Right":
+            return 1.0 if cross_z > 0 else 0.0
+        else:
+            return 1.0 if cross_z < 0 else 0.0
 
+    # ── Extract biometrics (same as trainer) ─────────────────
+    def extract_biometrics(self, landmarks):
+        lm         = np.array(landmarks)
+        palm_width = np.linalg.norm(lm[5] - lm[17]) + 1e-6
+        mcp_pts    = [2, 5, 9, 13, 17]
+        finger_lengths = []
+        for tip, mcp in zip(FINGER_TIPS, mcp_pts):
+            finger_lengths.append(np.linalg.norm(lm[tip] - lm[mcp]) / palm_width)
+        middle_len = finger_lengths[2] + 1e-6
+        ratios     = [fl / middle_len for fl in finger_lengths]
+        span       = np.linalg.norm(lm[4] - lm[20]) / palm_width
+        knuckle    = np.linalg.norm(lm[5] - lm[9]) / palm_width
+        return ratios + [span, knuckle]
+
+    # ── Extract gesture features ──────────────────────────────
     def extract_features(self, landmarks, hand_label):
         lm = np.array(landmarks)
         features = []
@@ -130,37 +107,24 @@ class EasyDSPController:
             features.append(lm[tip][1] - lm[mcp][1])
         for i in range(len(FINGER_TIPS)-1):
             features.append(np.linalg.norm(lm[FINGER_TIPS[i]] - lm[FINGER_TIPS[i+1]]))
-        features.append(self.get_hand_orientation(landmarks))
+        features.append(self.get_hand_orientation(landmarks, hand_label))
         features.append(1.0 if hand_label == "Right" else 0.0)
         return features
 
-    # ── Check if ONLY index finger is pointing ───────────────
-    def is_index_pointing(self, landmarks):
-        lm = np.array(landmarks)
-        wrist = lm[0]
-        index_dist  = np.linalg.norm(lm[8]  - wrist)
-        middle_dist = np.linalg.norm(lm[12] - wrist)
-        ring_dist   = np.linalg.norm(lm[16] - wrist)
-        pinky_dist  = np.linalg.norm(lm[20] - wrist)
-        index_extended  = index_dist > 0.22
-        middle_curled   = middle_dist < 0.12
-        ring_curled     = ring_dist   < 0.12
-        pinky_curled    = pinky_dist  < 0.12
-        index_dominant  = index_dist > (middle_dist * 2.0)
-        return index_extended and middle_curled and ring_curled and pinky_curled and index_dominant
-
-    # ── Check if live drawn path matches saved key ────────────
-    def check_unlock(self):
-        if not self.lock_key or len(self.live_path) < 10:
+    # ── Check biometric match ─────────────────────────────────
+    # Compare saved hand measurements vs live hand
+    # Uses FIR averaging over BIO_CHECK_COUNT frames
+    def check_biometric(self, bio_frames):
+        if not self.biolock or len(bio_frames) < 10:
             return False
-        # Normalize live path
-        norm_live = normalize_path(self.live_path)
-        # DTW comparison
-        score = dtw_distance(norm_live, self.lock_key)
-        # Normalize score by path length
-        score = score / 50
-        print(f"   DTW Score: {score:.4f} (threshold: {self.DTW_THRESHOLD})")
-        return score < self.DTW_THRESHOLD
+        # FIR: average all collected frames
+        # y = (1/N) * sum of all bio frames
+        avg_live = np.mean(bio_frames, axis=0)
+        saved    = np.array(self.biolock)
+        # Euclidean distance between saved and live biometrics
+        score    = np.linalg.norm(avg_live - saved)
+        print(f"   Bio score: {score:.4f} (threshold: {self.BIO_THRESHOLD})")
+        return score < self.BIO_THRESHOLD
 
     def recognize_gesture(self):
         if not self.gestures or len(self.current_seq) < 40:
@@ -193,21 +157,19 @@ class EasyDSPController:
         elif "exit" in n or "stop" in n:
             pyautogui.press('esc')
             print("⏹ [EXIT SLIDESHOW]")
-        # Reset auto-lock timer on every action
         self.unlock_time = time.time()
 
     def run(self):
         cap = cv2.VideoCapture(0)
 
-        if not self.lock_key:
-            print("\n⚠ No lock key found!")
-            print("  Go to Option 1 (Trainer) and press K to set your secret pattern.")
+        if not self.biolock:
+            print("\n⚠ No Bio-Lock found!")
+            print("  Go to Trainer → press K to set your hand biometric.")
             print("  Running WITHOUT lock for now...\n")
-            self.is_unlocked = True
         else:
             print("\n🔒 CONTROLLER LOCKED")
-            print("   Draw your secret pattern in air to unlock!")
-            print("   Point your INDEX finger and draw — lift hand to confirm.\n")
+            print("   Show your hand to unlock!")
+            print("   System checks hand size + gesture simultaneously.\n")
 
         print("   Press CTRL+C to stop.\n")
 
@@ -220,13 +182,13 @@ class EasyDSPController:
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 result   = self.detector.detect(mp_image)
 
-                # ── Auto lock after idle ──────────────────────
+                # ── Auto lock ─────────────────────────────────
                 if self.is_unlocked and self.unlock_time:
                     if time.time() - self.unlock_time > self.AUTO_LOCK_SECS:
-                        self.is_unlocked    = False
-                        self.unlock_time    = None
-                        self.iir_draw_prev  = None
-                        print("\n🔒 Auto-locked after 5 minutes idle.")
+                        self.is_unlocked       = False
+                        self.unlock_time       = None
+                        self.bio_check_frames  = []
+                        print("\n🔒 Auto-locked after 5 min idle.")
 
                 if result.hand_landmarks:
                     frame_features = []
@@ -234,27 +196,39 @@ class EasyDSPController:
                     for idx, hand_lms in enumerate(result.hand_landmarks):
                         hand_label = "Right"
                         if result.handedness and idx < len(result.handedness):
-                            hand_label = result.handedness[idx][0].display_name
+                            raw_label  = result.handedness[idx][0].display_name
+                            hand_label = "Left" if raw_label == "Right" else "Right"
 
                         raw    = [[lm.x, lm.y, lm.z] for lm in hand_lms]
                         smooth = self.apply_iir(raw, hand_label)
 
-                        # ── LOCKED: track index fingertip for air draw ──
-                        if not self.is_unlocked:
-                            tip_x = smooth[8][0]
-                            tip_y = smooth[8][1]
-                            # IIR smooth the drawing point
-                            # y[n] = 0.5*x[n] + 0.5*y[n-1]
-                            smooth_pt = self.apply_iir_draw((tip_x, tip_y))
-                            self.live_path.append(smooth_pt)
-                            self.is_drawing = True
+                        # ── LOCKED: collect biometrics ────────
+                        if not self.is_unlocked and self.biolock:
+                            bio = self.extract_biometrics(smooth)
+                            self.bio_check_frames.append(bio)
 
-                        # ── UNLOCKED: recognize gestures ────────────────
-                        else:
+                            # Check every BIO_CHECK_COUNT frames simultaneously
+                            if len(self.bio_check_frames) >= self.BIO_CHECK_COUNT:
+                                if self.check_biometric(self.bio_check_frames):
+                                    self.is_unlocked      = True
+                                    self.unlock_time      = time.time()
+                                    self.bio_check_frames = []
+                                    self.current_seq      = []
+                                    self.check_result_msg  = "UNLOCKED!"
+                                    self.check_result_time = time.time()
+                                    print("✅ UNLOCKED! Hand biometric matched!")
+                                else:
+                                    self.bio_check_frames = []
+                                    self.check_result_msg  = "NOT MATCHED! Try again."
+                                    self.check_result_time = time.time()
+                                    print("❌ Hand not recognized! Try again.")
+
+                        # ── UNLOCKED: recognize gestures ──────
+                        if self.is_unlocked:
                             features = self.extract_features(smooth, hand_label)
                             frame_features.extend(features)
 
-                    # ── Gesture recognition (only when unlocked) ──────
+                    # Gesture recognition
                     if self.is_unlocked and frame_features:
                         self.current_seq.append(frame_features)
                         if len(self.current_seq) > 40:
@@ -279,30 +253,26 @@ class EasyDSPController:
                             self.is_locked_action = False
 
                 else:
-                    # ── Hand left frame ────────────────────────
-                    if not self.is_unlocked and self.is_drawing and len(self.live_path) > 10:
-                        # Hand removed → check the drawn path
-                        print("   Checking pattern...")
-                        if self.check_unlock():
-                            self.is_unlocked   = True
-                            self.unlock_time   = time.time()
-                            self.current_seq   = []
-                            print("✅ UNLOCKED! You can now control the PPT!")
-                        else:
-                            print("❌ Pattern does not match! Try again.")
-
-                    # Reset draw state
-                    self.live_path     = []
-                    self.is_drawing    = False
-                    self.iir_draw_prev = None
-
-                    # Reset IIR
-                    for k in self.iir_prev: self.iir_prev[k] = None
+                    # Hand left frame — reset
+                    for k in self.iir_prev:
+                        self.iir_prev[k] = None
+                    if not self.is_unlocked:
+                        self.bio_check_frames = []
                     if self.is_unlocked:
                         self.is_locked_action = False
                         self.current_seq      = []
                         self.stable_count     = 0
                         self.stable_gesture   = "None"
+
+                # ── Print status ──────────────────────────────
+                if not self.is_unlocked and self.biolock:
+                    frames_done = len(self.bio_check_frames)
+                    pct         = int((frames_done / self.BIO_CHECK_COUNT) * 100)
+                    print(f"\r   Scanning hand... {pct}%    ", end="")
+
+                # Show check result for 2 seconds
+                if self.check_result_msg and (time.time() - self.check_result_time < 2):
+                    print(f"\r   {self.check_result_msg}    ", end="")
 
                 cv2.waitKey(1)
 

@@ -20,7 +20,7 @@ class DSPGestureTrainer:
             num_hands=2,
             min_hand_detection_confidence=0.7
         )
-        self.detector = vision.HandLandmarker.create_from_options(options)
+        self.detector          = vision.HandLandmarker.create_from_options(options)
         self.gestures          = {}
         self.is_recording      = False
         self.current_recording = []
@@ -28,11 +28,9 @@ class DSPGestureTrainer:
         self.fir_buffers       = {}
         self.fir_window        = 3
 
-        # ── Air Draw Lock ─────────────────────────────────────
-        self.is_drawing_key  = False
-        self.air_draw_path   = []
-        self.fir_draw_buffer = []
-        self.last_point      = None  # to avoid duplicate points
+        # ── Bio Lock recording ────────────────────────────────
+        self.recording_biolock = False
+        self.biolock_frames    = []   # collect multiple frames for stability
 
         self.load_gestures()
 
@@ -45,47 +43,47 @@ class DSPGestureTrainer:
             buf.pop(0)
         return np.mean(buf, axis=0).tolist()
 
-    # ── FIR for drawing path ──────────────────────────────────
-    # y[n] = (x[n] + x[n-1] + x[n-2]) / 3
-    def apply_fir_to_point(self, point):
-        self.fir_draw_buffer.append(point)
-        if len(self.fir_draw_buffer) > self.fir_window:
-            self.fir_draw_buffer.pop(0)
-        arr = np.array(self.fir_draw_buffer)
-        return tuple(np.mean(arr, axis=0).tolist())
-
-    def get_hand_orientation(self, landmarks):
+    def get_hand_orientation(self, landmarks, hand_label):
         lm      = np.array(landmarks)
         v1      = lm[5]  - lm[0]
         v2      = lm[17] - lm[0]
         cross_z = v1[0] * v2[1] - v1[1] * v2[0]
-        return 1.0 if cross_z > 0 else 0.0
+        if hand_label == "Right":
+            return 1.0 if cross_z > 0 else 0.0
+        else:
+            return 1.0 if cross_z < 0 else 0.0
 
-    # ── Check if ONLY index finger is pointing ───────────────
-    # Index tip must be FAR from wrist
-    # Middle, ring, pinky tips must be CLOSE to wrist (fully curled)
-    def is_index_pointing(self, landmarks):
+    # ── Extract hand biometric measurements ──────────────────
+    # These are RATIOS so they are scale-independent
+    # but unique per person (finger length proportions)
+    def extract_biometrics(self, landmarks):
         lm = np.array(landmarks)
-        wrist = lm[0]
 
-        # Distance of each fingertip from wrist
-        index_dist  = np.linalg.norm(lm[8]  - wrist)
-        middle_dist = np.linalg.norm(lm[12] - wrist)
-        ring_dist   = np.linalg.norm(lm[16] - wrist)
-        pinky_dist  = np.linalg.norm(lm[20] - wrist)
-        thumb_dist  = np.linalg.norm(lm[4]  - wrist)
+        # Palm width = index MCP to pinky MCP
+        palm_width = np.linalg.norm(lm[5] - lm[17]) + 1e-6
 
-        # Index must be clearly extended (far from wrist)
-        index_extended  = index_dist > 0.25
-        # All others must be clearly curled (close to wrist)
-        middle_curled   = middle_dist < 0.20
-        ring_curled     = ring_dist   < 0.20
-        pinky_curled    = pinky_dist  < 0.20
-        # Index must be significantly longer than middle
-        index_dominant  = index_dist > (middle_dist * 1.4)
+        # Each finger length (MCP to TIP) normalized by palm width
+        # FIR applied already so values are smooth
+        finger_lengths = []
+        mcp_pts = [2, 5, 9, 13, 17]
+        for tip, mcp in zip(FINGER_TIPS, mcp_pts):
+            length = np.linalg.norm(lm[tip] - lm[mcp]) / palm_width
+            finger_lengths.append(length)
 
-        return index_extended and middle_curled and ring_curled and pinky_curled and index_dominant
+        # Finger ratios relative to middle finger (most stable)
+        middle_len = finger_lengths[2] + 1e-6
+        ratios = [fl / middle_len for fl in finger_lengths]
 
+        # Hand span: thumb tip to pinky tip / palm width
+        span = np.linalg.norm(lm[4] - lm[20]) / palm_width
+
+        # Knuckle gaps normalized
+        knuckle_gap = np.linalg.norm(lm[5] - lm[9]) / palm_width
+
+        biometrics = ratios + [span, knuckle_gap]
+        return biometrics  # 7 values unique to each person
+
+    # ── Extract gesture features ──────────────────────────────
     def extract_features(self, landmarks, hand_label):
         lm = np.array(landmarks)
         features = []
@@ -96,7 +94,7 @@ class DSPGestureTrainer:
             features.append(lm[tip][1] - lm[mcp][1])
         for i in range(len(FINGER_TIPS)-1):
             features.append(np.linalg.norm(lm[FINGER_TIPS[i]] - lm[FINGER_TIPS[i+1]]))
-        features.append(self.get_hand_orientation(landmarks))
+        features.append(self.get_hand_orientation(landmarks, hand_label))
         features.append(1.0 if hand_label == "Right" else 0.0)
         return features
 
@@ -109,17 +107,13 @@ class DSPGestureTrainer:
         with open("clean_gestures.pkl", "wb") as f:
             pickle.dump(self.gestures, f)
 
-    def save_lock_key(self, path):
-        path_arr = np.array(path)
-        # Normalize
-        path_arr[:,0] = (path_arr[:,0] - path_arr[:,0].min()) / (path_arr[:,0].max() - path_arr[:,0].min() + 1e-6)
-        path_arr[:,1] = (path_arr[:,1] - path_arr[:,1].min()) / (path_arr[:,1].max() - path_arr[:,1].min() + 1e-6)
-        # Resample to 50 points
-        indices = np.linspace(0, len(path_arr)-1, 50).astype(int)
-        sampled = path_arr[indices]
-        with open("lock_key.pkl", "wb") as f:
-            pickle.dump(sampled.tolist(), f)
-        print("🔑 Lock key saved!")
+    def save_biolock(self, frames):
+        # Average biometrics over multiple frames for stability
+        # FIR: y = mean of all collected frames
+        avg = np.mean(frames, axis=0).tolist()
+        with open("biolock.pkl", "wb") as f:
+            pickle.dump(avg, f)
+        print("🔑 Bio-lock saved!")
 
     def remove_background_white(self, frame, landmarks_list):
         display = np.full_like(frame, (255,255,255), dtype=np.uint8)
@@ -160,17 +154,11 @@ if __name__ == "__main__":
     print("\n╔══════════════════════════════════════════╗")
     print("║         DSP GESTURE TRAINER              ║")
     print("╠══════════════════════════════════════════╣")
-    print("║  R  = Start/Stop Recording gesture       ║")
-    print("║  S  = Save gesture                       ║")
-    print("║  K  = Record secret air-draw lock key    ║")
-    print("║  Q  = Quit                               ║")
-    print("╠══════════════════════════════════════════╣")
-    print("║  HOW TO DRAW SECRET KEY:                 ║")
-    print("║  1. Press K to start                     ║")
-    print("║  2. Point ONLY index finger              ║")
-    print("║  3. Draw your pattern in air             ║")
-    print("║  4. Curl all fingers to STOP drawing     ║")
-    print("║  5. Press K to save                      ║")
+    print("║  R = Start/Stop Recording gesture        ║")
+    print("║  S = Save gesture                        ║")
+    print("║  K = Record Bio-Lock key                 ║")
+    print("║       (hold still for 3 seconds)         ║")
+    print("║  Q = Quit                                ║")
     print("╚══════════════════════════════════════════╝\n")
 
     while True:
@@ -189,7 +177,8 @@ if __name__ == "__main__":
         for idx, hand_lms in enumerate(result.hand_landmarks):
             hand_label = "Right"
             if result.handedness and idx < len(result.handedness):
-                hand_label = result.handedness[idx][0].display_name
+                raw_label  = result.handedness[idx][0].display_name
+                hand_label = "Left" if raw_label == "Right" else "Right"
 
             raw      = [[lm.x, lm.y, lm.z] for lm in hand_lms]
             smooth   = system.apply_fir_filter(raw, hand_label)
@@ -197,7 +186,7 @@ if __name__ == "__main__":
             frame_features.extend(features)
             system.draw_landmarks(display, smooth)
 
-            orient       = system.get_hand_orientation(smooth)
+            orient       = system.get_hand_orientation(smooth, hand_label)
             orient_text  = "FRONT" if orient == 1.0 else "BACK"
             orient_color = (0,200,0) if orient == 1.0 else (0,100,255)
             wrist_x = int(smooth[0][0]*640)
@@ -216,69 +205,42 @@ if __name__ == "__main__":
                     cv2.putText(display, f"{finger_names[i]}: {state}",
                                 (10, 30+i*22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-            # ── Air draw: ONLY when index is pointing ─────────
-            if system.is_drawing_key:
-                pointing = system.is_index_pointing(smooth)
-
-                if pointing:
-                    tip_x     = smooth[8][0]
-                    tip_y     = smooth[8][1]
-                    # FIR smooth: y[n] = (x[n] + x[n-1] + x[n-2]) / 3
-                    smooth_pt = system.apply_fir_to_point((tip_x, tip_y))
-
-                    # Only add if moved enough (avoid duplicate points)
-                    if system.last_point is None or \
-                       np.linalg.norm(np.array(smooth_pt) - np.array(system.last_point)) > 0.01:
-                        system.air_draw_path.append(smooth_pt)
-                        system.last_point = smooth_pt
-
-                    # Draw path on screen
-                    for pi in range(1, len(system.air_draw_path)):
-                        p1 = (int(system.air_draw_path[pi-1][0]*640),
-                              int(system.air_draw_path[pi-1][1]*480))
-                        p2 = (int(system.air_draw_path[pi][0]*640),
-                              int(system.air_draw_path[pi][1]*480))
-                        cv2.line(display, p1, p2, (0,0,255), 3)
-
-                    # Show fingertip dot in red
-                    cv2.circle(display,
-                               (int(smooth[8][0]*640), int(smooth[8][1]*480)),
-                               10, (0,0,255), -1)
-
-                    # Show drawing status
-                    cv2.putText(display, "✏ DRAWING...",
-                                (220, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 3)
-                else:
-                    # Index not pointing — show pause status
-                    cv2.putText(display, "✋ CURL TO PAUSE",
-                                (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,150,255), 2)
+            # ── Bio-lock recording ─────────────────────────────
+            if system.recording_biolock:
+                bio = system.extract_biometrics(smooth)
+                system.biolock_frames.append(bio)
 
         if frame_features and system.is_recording:
             system.current_recording.append(frame_features)
             system.frames_for_gif.append(display.copy())
 
-        # Recording indicator
+        # Recording indicators
         if system.is_recording:
             cv2.putText(display, "● RECORDING GESTURE", (300, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
             cv2.putText(display, f"Frames: {len(system.current_recording)}",
                         (300,55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,200), 1)
 
-        # Air draw mode indicator
-        if system.is_drawing_key:
-            cv2.putText(display, f"KEY MODE ON | Points: {len(system.air_draw_path)}",
-                        (150, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,0,0), 2)
-            cv2.putText(display, "Point index finger to draw | Press K to save",
-                        (60, 440), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,0,0), 1)
+        if system.recording_biolock:
+            frames_left = max(0, 90 - len(system.biolock_frames))
+            cv2.putText(display, f"SCANNING HAND... {frames_left} frames left",
+                        (130, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,100,0), 2)
+            cv2.putText(display, "Hold your hand STILL",
+                        (200, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,100,0), 2)
+            # Auto save after 90 frames (~3 seconds)
+            if len(system.biolock_frames) >= 90:
+                system.save_biolock(system.biolock_frames)
+                system.recording_biolock = False
+                system.biolock_frames    = []
 
-        # Lock key status
-        lock_exists = os.path.exists("lock_key.pkl")
-        lock_color  = (0,200,0) if lock_exists else (0,0,200)
-        lock_text   = "Lock Key: SET ✓" if lock_exists else "Lock Key: NOT SET — Press K"
-        cv2.putText(display, lock_text,
-                    (10,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, lock_color, 1)
+        # Status bar
+        bio_exists  = os.path.exists("biolock.pkl")
+        bio_color   = (0,200,0) if bio_exists else (0,0,200)
+        bio_text    = "Bio-Lock: SET ✓" if bio_exists else "Bio-Lock: NOT SET — Press K"
+        cv2.putText(display, bio_text,
+                    (10,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bio_color, 1)
         cv2.putText(display, f"Gestures: {len(system.gestures)}",
-                    (480,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100,100,100), 1)
+                    (450,460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100,100,100), 1)
 
         cv2.imshow("DSP Trainer", display)
         key = cv2.waitKey(1) & 0xFF
@@ -303,18 +265,9 @@ if __name__ == "__main__":
                     [cv2.cvtColor(f, cv2.COLOR_BGR2RGB) for f in system.frames_for_gif[::2]], fps=15)
                 print(f"✅ Saved: '{name}' ({len(system.gestures[name])} samples)")
         elif key == ord('k'):
-            system.is_drawing_key = not system.is_drawing_key
-            if system.is_drawing_key:
-                system.air_draw_path   = []
-                system.fir_draw_buffer = []
-                system.last_point      = None
-                print("✏ Draw mode ON — point index finger and draw your secret pattern!")
-                print("   Curl fingers to pause drawing. Press K again to save.")
-            else:
-                if len(system.air_draw_path) > 10:
-                    system.save_lock_key(system.air_draw_path)
-                else:
-                    print("⚠ Path too short! Try again.")
+            system.recording_biolock = True
+            system.biolock_frames    = []
+            print("🔑 Hold your hand still for 3 seconds...")
 
     cap.release()
     cv2.destroyAllWindows()
